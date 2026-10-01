@@ -16,9 +16,10 @@ def test_held_action_not_executed():
     """Test that held action is not executed initially"""
     clear_effects()
     
-    # Clear held_actions table
-    with db.transaction() as conn:
-        conn.execute("DELETE FROM held_actions")
+    # Clear held_actions table using direct connection
+    conn = db.get_connection()
+    conn.execute("DELETE FROM held_actions")
+    conn.commit()
     
     # Insert a held action
     import json
@@ -47,8 +48,9 @@ def test_approve_executes_once():
     clear_effects()
     
     # Clear held_actions table
-    with db.transaction() as conn:
-        conn.execute("DELETE FROM held_actions")
+    conn = db.get_connection()
+    conn.execute("DELETE FROM held_actions")
+    conn.commit()
     
     # Insert a held action
     import json
@@ -85,8 +87,9 @@ def test_double_approve_idempotent():
     clear_effects()
     
     # Clear held_actions table
-    with db.transaction() as conn:
-        conn.execute("DELETE FROM held_actions")
+    conn = db.get_connection()
+    conn.execute("DELETE FROM held_actions")
+    conn.commit()
     
     # Insert a held action
     import json
@@ -115,8 +118,9 @@ def test_reject_discards_and_penalises():
     clear_effects()
     
     # Clear held_actions table
-    with db.transaction() as conn:
-        conn.execute("DELETE FROM held_actions")
+    conn = db.get_connection()
+    conn.execute("DELETE FROM held_actions")
+    conn.commit()
     
     # Insert a held action
     import json

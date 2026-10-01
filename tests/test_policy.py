@@ -281,10 +281,28 @@ def test_rate_limit():
         "context": {}
     }
     
-    # This test would need to insert events into the database first
-    # For now, just verify the function exists
-    from engine.policy import exceeds_rate_limit
-    assert callable(exceeds_rate_limit)
+    # Insert 6 events in the last minute (exceeds limit of 5)
+    from gateway.db import db
+    from datetime import datetime, timedelta, timezone
+    
+    conn = db.get_connection()
+    for i in range(6):
+        ts = (datetime.now(timezone.utc) - timedelta(seconds=i * 5)).isoformat().replace("+00:00", "Z")
+        conn.execute("""
+            INSERT INTO events (event_id, ts, agent_id, type, tool, args_json, nonce, signature, verdict, response)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (f"rate-test-{i}", ts, "researcher", "tool_call", "search_web", '{"query":"test"}', f"nonce-{i}", "sig", "ALLOW", "allow"))
+    conn.commit()
+    
+    # Now check if rate limit is exceeded
+    result = check_policy(event, policy, {})
+    assert result["allowed"] == False
+    assert result["rule"] == "rate.max_per_minute"
+    assert result["severity"] == "MEDIUM"
+    
+    # Clean up
+    conn.execute("DELETE FROM events WHERE event_id LIKE 'rate-test-%'")
+    conn.commit()
 
 
 if __name__ == "__main__":

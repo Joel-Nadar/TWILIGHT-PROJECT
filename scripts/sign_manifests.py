@@ -2,9 +2,15 @@
 Sign agent manifests with admin key.
 Hash each agent config, create manifest, and save trusted copy.
 """
+import sys
+from pathlib import Path
+
+# Add project root to sys.path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
 import json
 import hashlib
-from pathlib import Path
 import nacl.signing
 import nacl.encoding
 

@@ -28,22 +28,20 @@ agent_inboxes: Dict[str, list] = {
 
 
 # Sensitive arguments to redact
-SENSITIVE_ARGS = {
-    "send_email": ["body"],
-    "make_payment": ["to_account"],
-    "send_message": ["content"]
-}
+SENSITIVE_FIELDS = ["body", "to_account", "content", "token", "key", "password", "secret"]
 
 
 def redact_args(tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    """Redact sensitive arguments for logging/audit"""
-    if tool not in SENSITIVE_ARGS:
-        return args.copy()
-    
+    """
+    Redact sensitive arguments. Centralised function used by chain.py, websocket.py, and events persistence.
+    Always redacts: body, to_account, content, tokens, keys.
+    """
     redacted = args.copy()
-    for sensitive_field in SENSITIVE_ARGS[tool]:
-        if sensitive_field in redacted:
-            redacted[sensitive_field] = "***"
+    
+    for field in SENSITIVE_FIELDS:
+        if field in redacted:
+            redacted[field] = "***"
+    
     return redacted
 
 

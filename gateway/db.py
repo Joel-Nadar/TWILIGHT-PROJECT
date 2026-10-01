@@ -398,6 +398,12 @@ class Database:
                 UPDATE audit SET record_json = ? WHERE seq = ?
             """, (new_record_json, seq))
     
+    def get_audit_record_by_seq(self, seq: int) -> Optional[Dict[str, Any]]:
+        """Get a specific audit record by sequence number"""
+        conn = self.get_connection()
+        row = conn.execute("SELECT * FROM audit WHERE seq = ?", (seq,)).fetchone()
+        return dict(row) if row else None
+    
     def get_last_audit_seq(self) -> int:
         """Get the last audit sequence number"""
         conn = self.get_connection()

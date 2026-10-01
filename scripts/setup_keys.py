@@ -2,9 +2,15 @@
 Generate Ed25519 keypairs for Twilight.
 Creates admin, gateway, and per-agent keys in keys/ directory.
 """
+import sys
+from pathlib import Path
+
+# Add project root to sys.path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
 import nacl.signing
 import nacl.encoding
-from pathlib import Path
 import json
 
 

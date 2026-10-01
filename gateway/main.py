@@ -283,5 +283,63 @@ async def get_config():
         "probation_clean_min": settings.probation_clean_min,
         "rate_window_sec": settings.rate_window_sec,
         "rate_halt_after_violations": settings.rate_halt_after_violations,
+        "audit_checkpoint_every": settings.audit_checkpoint_every,
+        "timestamp_window_sec": settings.timestamp_window_sec,
         "drift_zscore_threshold": settings.drift_zscore_threshold
+    }
+
+
+@app.get("/audit")
+async def get_audit(limit: int = 100, offset: int = 0, agent_id: Optional[str] = None):
+    """Get audit records with optional filtering"""
+    records = db.get_audit_records(agent_id=agent_id, limit=limit)
+    
+    # Apply offset (for newest-first pagination)
+    if offset > 0:
+        records = records[offset:]
+    
+    # Sort newest-first (reverse by seq)
+    records = list(reversed(records))
+    
+    return {
+        "records": records,
+        "count": len(records)
+    }
+
+
+@app.get("/audit/verify")
+async def verify_audit_chain():
+    """Verify the audit chain integrity"""
+    from audit.verify import verify_chain
+    return verify_chain()
+
+
+@app.post("/admin/tamper-log/{seq}")
+async def tamper_audit_log(seq: int):
+    """
+    DEMO ONLY: Directly edit an audit record to demonstrate verification failure.
+    Only works when DEMO_MODE=true.
+    """
+    if not settings.demo_mode:
+        raise HTTPException(status_code=403, detail="Tamper-log endpoint only available in DEMO_MODE")
+    
+    # Get current record
+    record = db.get_audit_record_by_seq(seq)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Audit record seq {seq} not found")
+    
+    # Modify the record (e.g., change verdict text)
+    import json
+    record_dict = json.loads(record["record_json"])
+    record_dict["verdict"] = "TAMPERED-" + record_dict.get("verdict", "")
+    new_record_json = json.dumps(record_dict, sort_keys=True, separators=(",", ":"))
+    
+    # Direct edit (bypass normal chain)
+    db.tamper_audit_row(seq, new_record_json)
+    
+    return {
+        "message": f"Audit record seq {seq} tampered with demo endpoint",
+        "seq": seq,
+        "original_verdict": record_dict.get("verdict").replace("TAMPERED-", ""),
+        "new_verdict": record_dict["verdict"]
     }

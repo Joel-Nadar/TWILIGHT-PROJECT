@@ -10,6 +10,8 @@ from gateway.websocket import manager
 from engine.trust import apply_penalty, status_for_score, apply_trust_update
 from datetime import datetime, timedelta, timezone
 
+__all__ = ["check_status", "decide", "apply_response_ladder", "write_incident", "check_sustained_rate_violations"]
+
 
 def check_status(agent: Dict[str, Any]) -> tuple[bool, str, str]:
     """

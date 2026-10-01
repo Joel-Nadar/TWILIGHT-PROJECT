@@ -274,6 +274,7 @@ Get audit records (redacted).
 **Query Parameters:**
 - `agent_id` (optional): Filter by agent
 - `limit` (optional, default 100): Maximum records to return
+- `offset` (optional, default 0): Pagination offset (newest-first)
 
 **Response (200 OK):**
 ```json
@@ -288,7 +289,8 @@ Get audit records (redacted).
       "record_hash": "abc123...",
       "signature": null
     }
-  ]
+  ],
+  "count": 1
 }
 ```
 
@@ -302,11 +304,72 @@ Verify the integrity of the audit chain.
 ```json
 {
   "valid": true,
+  "records_checked": 10,
   "first_broken_seq": null,
   "expected_hash": null,
-  "actual_hash": null
+  "actual_hash": null,
+  "reason": null,
+  "checkpoints_checked": 1
 }
 ```
+
+**Response (200 OK) - Invalid:**
+```json
+{
+  "valid": false,
+  "records_checked": 5,
+  "first_broken_seq": 5,
+  "expected_hash": "expected_hash_value",
+  "actual_hash": "actual_hash_value",
+  "reason": "Hash mismatch at seq 5",
+  "checkpoints_checked": 0
+}
+```
+
+---
+
+### POST /admin/tamper-log/{seq}
+
+**DEMO ONLY** - Directly edit an audit record to demonstrate verification failure. This endpoint bypasses the normal audit chain and is only available when `DEMO_MODE=true`. **Do not use in production.**
+
+**Path Parameters:**
+- `seq`: Sequence number of the audit record to tamper with
+
+**Response (200 OK):**
+```json
+{
+  "message": "Audit record seq 5 tampered with demo endpoint",
+  "seq": 5,
+  "original_verdict": "ALLOW",
+  "new_verdict": "TAMPERED-ALLOW"
+}
+```
+
+**Response (403 Forbidden):**
+```json
+{
+  "detail": "Tamper-log endpoint only available in DEMO_MODE"
+}
+```
+
+---
+
+## Audit Chain Details
+
+**Canonical JSON Rule:**
+```json
+{"agent_id":"researcher","args":{"query":"example"},"event_id":"...","nonce":"...","tool":"search_web","ts":"...","type":"tool_call"}
+```
+- Sorted keys
+- Compact separators (no spaces after commas/colons)
+- UTF-8 encoding
+- No extra whitespace
+
+**Checkpoint Format:**
+- Created every `AUDIT_CHECKPOINT_EVERY` records
+- Signed by gateway Ed25519 private key
+- Contains: `{"seq": seq, "record_hash": record_hash}`
+- Stored in `audit_checkpoints` table
 
 **Response (200 OK) - Invalid:**
 ```json

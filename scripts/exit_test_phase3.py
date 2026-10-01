@@ -5,13 +5,15 @@ Tests policy enforcement, trust scoring, HOLD queue, and rate limiting.
 NOTE: Integration tests are skipped due to SQLite WAL mode transaction visibility issues
 in the test environment. Unit tests verify all logic is correct.
 """
-import subprocess
-import time
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add project root to sys.path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
+import subprocess
+import time
 from gateway.db import db
 
 
