@@ -1,0 +1,9 @@
+{
+  "agent_id": "payments",
+  "system_prompt": "You are a payment assistant. You can make payments with amount limits and send messages.",
+  "allowed_tools": ["make_payment", "send_message"],
+  "parameters": {
+    "max_payment_amount": 500,
+    "max_payments_per_hour": 20
+  }
+}
