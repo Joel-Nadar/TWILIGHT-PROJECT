@@ -12,7 +12,8 @@ from datetime import datetime
 
 from gateway.schemas import (
     AgentRegistration, ActionEvent, Decision, HeartbeatRequest, HeartbeatResponse,
-    AdminApproval, AgentInfo, VerifyChainResult, Incident, TrustHistoryEntry
+    AdminApproval, AgentInfo, VerifyChainResult, Incident, TrustHistoryEntry,
+    RestoreStepResult, RestoreResult
 )
 from gateway.pipeline import run_pipeline, load_agent_policy
 from gateway.config import settings
@@ -46,7 +47,7 @@ manifests = {}
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database and load policies/manifests"""
+    """Initialize database, load policies/manifests, start background tasks"""
     # Create database schema
     db.create_schema()
     
@@ -63,6 +64,17 @@ async def startup_event():
         agent_id = manifest_file.stem.replace(".manifest", "")
         with open(manifest_file, 'r') as f:
             manifests[agent_id] = json.load(f)
+    
+    # Start background tasks
+    from gateway.background import start_background_tasks
+    await start_background_tasks(app)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop background tasks"""
+    from gateway.background import stop_background_tasks
+    await stop_background_tasks(app)
     
     print(f"Loaded {len(policies)} policies and {len(manifests)} manifests")
 
@@ -127,23 +139,23 @@ async def submit_action(event: ActionEvent, x_api_key: Optional[str] = Header(No
 
 @app.get("/agents")
 async def list_agents():
-    """List all registered agents"""
-    agents = db.get_all_agents()
+    """List all registered agents with status, trust, history, etc."""
+    agents = db.get_agents_with_history()
     
-    return {
-        "agents": [
-            {
-                "agent_id": a["agent_id"],
-                "status": a["status"],
-                "trust_score": a["trust_score"],
-                "last_seen": a["last_seen"],
-                "current_rate_limit": a.get("current_rate_limit"),
-                "config_hash_state": a.get("config_hash_state", "matched"),
-                "probation_until": a.get("probation_until")
-            }
-            for a in agents
-        ]
-    }
+    result = []
+    for agent in agents:
+        result.append({
+            "agent_id": agent['agent_id'],
+            "status": agent['status'],
+            "trust_score": agent['trust_score'],
+            "last_seen": agent['last_seen'],
+            "config_hash_ok": agent['config_hash_state'] == 'matched',
+            "probation_until": agent['probation_until'],
+            "effective_rate_limit": agent['current_rate_limit'],
+            "trust_history": agent['trust_history']
+        })
+    
+    return {"agents": result}
 
 
 @app.get("/agents/{agent_id}")
@@ -269,26 +281,6 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 
-@app.get("/config")
-async def get_config():
-    """Get current gateway configuration thresholds"""
-    return {
-        "trust_healthy_min": settings.trust_healthy_min,
-        "trust_flag_min": settings.trust_flag_min,
-        "trust_throttle_min": settings.trust_throttle_min,
-        "trust_recovery_per_min": settings.trust_recovery_per_min,
-        "trust_hysteresis": settings.trust_hysteresis,
-        "probation_start_score": settings.probation_start_score,
-        "probation_cap": settings.probation_cap,
-        "probation_clean_min": settings.probation_clean_min,
-        "rate_window_sec": settings.rate_window_sec,
-        "rate_halt_after_violations": settings.rate_halt_after_violations,
-        "audit_checkpoint_every": settings.audit_checkpoint_every,
-        "timestamp_window_sec": settings.timestamp_window_sec,
-        "drift_zscore_threshold": settings.drift_zscore_threshold
-    }
-
-
 @app.get("/audit")
 async def get_audit(limit: int = 100, offset: int = 0, agent_id: Optional[str] = None):
     """Get audit records with optional filtering"""
@@ -307,7 +299,7 @@ async def get_audit(limit: int = 100, offset: int = 0, agent_id: Optional[str] =
     }
 
 
-@app.get("/audit/verify")
+@app.get("/audit/verify", response_model=VerifyChainResult)
 async def verify_audit_chain():
     """Verify the audit chain integrity"""
     from audit.verify import verify_chain
@@ -343,3 +335,367 @@ async def tamper_audit_log(seq: int):
         "original_verdict": record_dict.get("verdict").replace("TAMPERED-", ""),
         "new_verdict": record_dict["verdict"]
     }
+
+
+@app.post("/heartbeat/{agent_id}")
+async def heartbeat(agent_id: str, request: Optional[HeartbeatRequest] = None):
+    """
+    Heartbeat challenge-response for config integrity verification.
+    First call (empty body): returns fresh challenge nonce.
+    Second call (with nonce+signature): verifies response and config hash.
+    """
+    from engine.heartbeat import generate_challenge, verify_heartbeat_response
+    from engine.enforcer import write_incident
+    from gateway.schemas import Severity, AgentStatus
+    from datetime import datetime, timezone
+    
+    # Get agent
+    agent = db.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Empty request or no nonce/signature: generate challenge
+    if not request or (not request.nonce and not request.signature):
+        challenge = generate_challenge(agent_id)
+        return HeartbeatResponse(challenge_nonce=challenge, config_hash=None)
+    
+    # Response: verify
+    is_valid, error, config_hash = verify_heartbeat_response(agent_id, request.nonce, request.signature)
+    
+    if not is_valid:
+        # Config mismatch: quarantine agent
+        if "mismatch" in error.lower():
+            # Set status QUARANTINED, trust unchanged
+            conn = db.get_connection()
+            conn.execute("""
+                UPDATE agents SET status = 'QUARANTINED', config_hash_state = 'mismatch' WHERE agent_id = ?
+            """, (agent_id,))
+            conn.commit()
+            
+            # Create incident
+            write_incident(
+                agent_id,
+                Severity.CRITICAL,
+                f"Config hash mismatch: {error}",
+                db.get_connection()
+            )
+            
+            # Audit record
+            from audit.chain import append_record
+            decision = {
+                "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "verdict": "QUARANTINE",
+                "response": "quarantined",
+                "reason": f"Config hash mismatch: {error}",
+                "rule": "heartbeat.config_mismatch",
+                "severity": Severity.CRITICAL,
+                "trust_before": agent['trust_score'],
+                "trust_after": agent['trust_score'],  # Unchanged
+                "status": AgentStatus.QUARANTINED
+            }
+            append_record(decision, {"agent_id": agent_id, "event_id": f"heartbeat-{datetime.now(timezone.utc).timestamp()}", "tool": "heartbeat", "args": {}})
+            
+            # Publish status and incident
+            await manager.publish({
+                "type": "status",
+                "data": {"agent_id": agent_id, "status": "QUARANTINED", "reason": error}
+            })
+            await manager.publish({
+                "type": "incident",
+                "data": {"agent_id": agent_id, "severity": "CRITICAL", "summary": f"Config hash mismatch: {error}"}
+            })
+        
+        raise HTTPException(status_code=403, detail=error)
+    
+    return HeartbeatResponse(challenge_nonce=None, config_hash=config_hash)
+
+
+@app.post("/admin/halt/{agent_id}")
+async def halt_agent(agent_id: str):
+    """Set agent status to HALTED (idempotent)"""
+    agent = db.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Set status HALTED
+    conn = db.get_connection()
+    conn.execute("UPDATE agents SET status = 'HALTED' WHERE agent_id = ?", (agent_id,))
+    conn.commit()
+    
+    return {"status": "halted", "agent_id": agent_id}
+
+
+@app.post("/admin/restore/{agent_id}")
+async def restore_agent(agent_id: str):
+    """
+    Restore agent from tampered config.
+    Steps: verify manifest signature, copy pristine config, re-hash, compare.
+    Returns per-step results.
+    """
+    from engine.heartbeat import verify_config_integrity
+    from gateway.schemas import RestoreStepResult, RestoreResult
+    from datetime import datetime, timezone
+    import shutil
+    import os
+    
+    steps = []
+    agent = db.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Step 1: Verify manifest signature
+    try:
+        is_valid, error, _ = verify_config_integrity(agent_id)
+        if not is_valid:
+            steps.append(RestoreStepResult(step="verify_manifest", success=False, details=error))
+            return RestoreResult(agent_id=agent_id, steps=steps, overall_success=False)
+        steps.append(RestoreStepResult(step="verify_manifest", success=True, details=None))
+    except Exception as e:
+        steps.append(RestoreStepResult(step="verify_manifest", success=False, details=str(e)))
+        return RestoreResult(agent_id=agent_id, steps=steps, overall_success=False)
+    
+    # Step 2: Copy pristine config from trusted_configs
+    try:
+        src = Path(f"manifests/trusted_configs/{agent_id}.json")
+        dst = Path(f"agents/configs/{agent_id}.json.tmp")
+        final = Path(f"agents/configs/{agent_id}.json")
+        
+        if not src.exists():
+            steps.append(RestoreStepResult(step="copy_config", success=False, details="Trusted config not found"))
+            return RestoreResult(agent_id=agent_id, steps=steps, overall_success=False)
+        
+        shutil.copy(src, dst)
+        # Atomic replace
+        if final.exists():
+            os.replace(dst, final)
+        else:
+            shutil.move(dst, final)
+        
+        steps.append(RestoreStepResult(step="copy_config", success=True, details=None))
+    except Exception as e:
+        steps.append(RestoreStepResult(step="copy_config", success=False, details=str(e)))
+        return RestoreResult(agent_id=agent_id, steps=steps, overall_success=False)
+    
+    # Step 3: Re-hash config
+    try:
+        import hashlib
+        config_path = Path(f"agents/configs/{agent_id}.json")
+        config_content = config_path.read_text()
+        config_hash = hashlib.sha256(config_content.encode('utf-8')).hexdigest()
+        steps.append(RestoreStepResult(step="rehash_config", success=True, details=None))
+    except Exception as e:
+        steps.append(RestoreStepResult(step="rehash_config", success=False, details=str(e)))
+        return RestoreResult(agent_id=agent_id, steps=steps, overall_success=False)
+    
+    # Step 4: Compare with manifest hash
+    try:
+        manifest_path = Path(f"manifests/{agent_id}.manifest.json")
+        manifest = json.loads(manifest_path.read_text())
+        manifest_hash = manifest.get("config_hash")
+        
+        if config_hash != manifest_hash:
+            steps.append(RestoreStepResult(step="compare_hash", success=False, details=f"Hash mismatch: {config_hash} != {manifest_hash}"))
+            return RestoreResult(agent_id=agent_id, steps=steps, overall_success=False)
+        
+        steps.append(RestoreStepResult(step="compare_hash", success=True, details=None))
+    except Exception as e:
+        steps.append(RestoreStepResult(step="compare_hash", success=False, details=str(e)))
+        return RestoreResult(agent_id=agent_id, steps=steps, overall_success=False)
+    
+    # Update config_hash_state
+    conn = db.get_connection()
+    conn.execute("UPDATE agents SET config_hash_state = 'matched' WHERE agent_id = ?", (agent_id,))
+    conn.commit()
+    
+    return RestoreResult(agent_id=agent_id, steps=steps, overall_success=True)
+
+
+@app.post("/admin/resume/{agent_id}")
+async def resume_agent(agent_id: str):
+    """
+    Resume agent from QUARANTINED or HALTED status.
+    Verifies config integrity before releasing. Applies probation on success.
+    """
+    from engine.heartbeat import verify_config_integrity
+    from engine.trust import status_for_score, apply_trust_update
+    from engine.enforcer import write_incident
+    from gateway.schemas import Severity, AgentStatus
+    from datetime import datetime, timezone, timedelta
+    
+    agent = db.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Only valid from QUARANTINED or HALTED
+    if agent['status'] not in ['QUARANTINED', 'HALTED']:
+        raise HTTPException(status_code=409, detail=f"Cannot resume agent in {agent['status']} status")
+    
+    # Verify config integrity
+    is_valid, error, config_hash = verify_config_integrity(agent_id)
+    if not is_valid:
+        raise HTTPException(status_code=409, detail=f"Config still mismatches: {error}")
+    
+    # Apply probation
+    from gateway.config import settings
+    new_trust = min(agent['trust_score'], settings.probation_start_score)
+    probation_until = (datetime.now(timezone.utc) + timedelta(minutes=settings.probation_clean_min)).isoformat().replace("+00:00", "Z")
+    
+    # Cap trust at PROBATION_CAP
+    if new_trust > settings.probation_cap:
+        new_trust = settings.probation_cap
+    
+    # Update agent
+    conn = db.get_connection()
+    conn.execute("""
+        UPDATE agents 
+        SET trust_score = ?, probation_until = ?, current_rate_limit = current_rate_limit / 2
+        WHERE agent_id = ?
+    """, (new_trust, probation_until, agent_id))
+    conn.commit()
+    
+    # Derive status from score
+    new_status = status_for_score(new_trust, agent['status'])
+    conn.execute("UPDATE agents SET status = ? WHERE agent_id = ?", (new_status.value, agent_id))
+    conn.commit()
+    
+    # Mark open incidents as resolved
+    conn.execute("UPDATE incidents SET resolved = 1 WHERE agent_id = ? AND resolved = 0", (agent_id,))
+    conn.commit()
+    
+    # Audit record
+    from audit.chain import append_record
+    decision = {
+        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "verdict": "RESUME",
+        "response": "resumed",
+        "reason": "Agent resumed by admin",
+        "rule": "admin.resume",
+        "severity": Severity.LOW,
+        "trust_before": agent['trust_score'],
+        "trust_after": new_trust,
+        "status": new_status
+    }
+    append_record(decision, {"agent_id": agent_id, "event_id": f"resume-{datetime.now(timezone.utc).timestamp()}", "tool": "admin", "args": {}})
+    
+    # Publish trust and status
+    await manager.publish({
+        "type": "trust",
+        "data": {"agent_id": agent_id, "trust_before": agent['trust_score'], "trust_after": new_trust}
+    })
+    await manager.publish({
+        "type": "status",
+        "data": {"agent_id": agent_id, "status": new_status.value, "reason": "Admin resume"}
+    })
+    
+    return {
+        "status": "resumed",
+        "agent_id": agent_id,
+        "trust_score": new_trust,
+        "status": new_status.value,
+        "probation_until": probation_until
+    }
+
+
+@app.get("/incidents")
+async def get_incidents(agent_id: Optional[str] = None, resolved: Optional[bool] = None,
+                      severity: Optional[str] = None, limit: int = 100, offset: int = 0):
+    """Get incidents with optional filters"""
+    incidents = db.get_incidents(agent_id=agent_id, resolved=resolved, severity=severity, limit=limit, offset=offset)
+    return {"incidents": incidents, "count": len(incidents)}
+
+
+@app.get("/config")
+async def get_config():
+    """Get current gateway configuration thresholds"""
+    return {
+        "trust_healthy_min": settings.trust_healthy_min,
+        "trust_flag_min": settings.trust_flag_min,
+        "trust_throttle_min": settings.trust_throttle_min,
+        "trust_recovery_per_min": settings.trust_recovery_per_min,
+        "trust_hysteresis": settings.trust_hysteresis,
+        "probation_start_score": settings.probation_start_score,
+        "probation_cap": settings.probation_cap,
+        "probation_clean_min": settings.probation_clean_min,
+        "rate_window_sec": settings.rate_window_sec,
+        "rate_halt_after_violations": settings.rate_halt_after_violations,
+        "audit_checkpoint_every": settings.audit_checkpoint_every,
+        "timestamp_window_sec": settings.timestamp_window_sec,
+        "heartbeat_interval_sec": settings.heartbeat_interval_sec,
+        "heartbeat_challenge_expire_sec": settings.heartbeat_challenge_expire_sec,
+        "hold_timeout_sec": settings.hold_timeout_sec,
+        "hold_sweep_interval_sec": settings.hold_sweep_interval_sec,
+        "trust_recovery_interval_sec": settings.trust_recovery_interval_sec,
+        "drift_zscore_threshold": settings.drift_zscore_threshold,
+        "demo_mode": settings.demo_mode
+    }
+
+async def get_agent(agent_id: str):
+    """Get specific agent with full details"""
+    agents = db.get_agents_with_history(agent_id)
+    if not agents:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    agent = agents[0]
+    return {
+        "agent_id": agent['agent_id'],
+        "status": agent['status'],
+        "trust_score": agent['trust_score'],
+        "last_seen": agent['last_seen'],
+        "config_hash_ok": agent['config_hash_state'] == 'matched',
+        "probation_until": agent['probation_until'],
+        "effective_rate_limit": agent['current_rate_limit'],
+        "trust_history": agent['trust_history']
+    }
+
+
+@app.get("/agents/{agent_id}")
+async def get_agent(agent_id: str):
+    """Get specific agent with full details"""
+    agents = db.get_agents_with_history(agent_id)
+    if not agents:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    agent = agents[0]
+    return {
+        "agent_id": agent['agent_id'],
+        "status": agent['status'],
+        "trust_score": agent['trust_score'],
+        "last_seen": agent['last_seen'],
+        "config_hash_ok": agent['config_hash_state'] == 'matched',
+        "probation_until": agent['probation_until'],
+        "effective_rate_limit": agent['current_rate_limit'],
+        "trust_history": agent['trust_history']
+    }
+
+
+@app.post("/attack/{attack_type}")
+async def run_attack(attack_type: str):
+    """
+    Attack dispatcher - runs attack driver for given type.
+    Returns 501 if driver not implemented, 404 if unknown type.
+    """
+    # Check if attack type is known
+    known_types = ["injection", "tamper", "spike", "spread", "impersonate"]
+    if attack_type not in known_types:
+        raise HTTPException(status_code=404, detail=f"Unknown attack type: {attack_type}")
+    
+    # Check if driver exists
+    try:
+        from pathlib import Path
+        driver_path = Path(f"attacks/{attack_type}.py")
+        if not driver_path.exists():
+            raise HTTPException(status_code=501, detail={"error": "not_implemented", "type": attack_type})
+        
+        # Import and run driver
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(f"attacks.{attack_type}", driver_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        
+        result = module.run()
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        # If driver has any error, return 501
+        raise HTTPException(status_code=501, detail={"error": "not_implemented", "type": attack_type, "details": str(e)})

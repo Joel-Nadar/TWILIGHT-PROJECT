@@ -354,6 +354,280 @@ Verify the integrity of the audit chain.
 
 ---
 
+### POST /heartbeat/{agent_id}
+
+Heartbeat challenge-response for config integrity verification.
+
+**Step 1: Get Challenge (empty body):**
+```json
+{}
+```
+
+**Response (200 OK):**
+```json
+{
+  "challenge_nonce": "random-nonce-hex",
+  "config_hash": null
+}
+```
+
+**Step 2: Respond to Challenge:**
+```json
+{
+  "nonce": "random-nonce-hex",
+  "signature": "signed-response-hex"
+}
+```
+
+**Response (200 OK) - Valid:**
+```json
+{
+  "challenge_nonce": null,
+  "config_hash": "abc123..."
+}
+```
+
+**Response (403 Forbidden) - Invalid:**
+```json
+{
+  "detail": "Invalid signature" | "Challenge expired" | "Config hash mismatch"
+}
+```
+
+On config mismatch, the agent is set to QUARANTINED with trust unchanged.
+
+---
+
+### POST /admin/halt/{agent_id}
+
+Set agent status to HALTED (idempotent).
+
+**Response (200 OK):**
+```json
+{
+  "status": "halted",
+  "agent_id": "researcher"
+}
+```
+
+---
+
+### POST /admin/restore/{agent_id}
+
+Restore agent from tampered config. Returns per-step results.
+
+**Response (200 OK) - Success:**
+```json
+{
+  "agent_id": "researcher",
+  "steps": [
+    {"step": "verify_manifest", "success": true, "details": null},
+    {"step": "copy_config", "success": true, "details": null},
+    {"step": "rehash_config", "success": true, "details": null},
+    {"step": "compare_hash", "success": true, "details": null}
+  ],
+  "overall_success": true
+}
+```
+
+**Response (200 OK) - Failure:**
+```json
+{
+  "agent_id": "researcher",
+  "steps": [
+    {"step": "verify_manifest", "success": false, "details": "Invalid signature"}
+  ],
+  "overall_success": false
+}
+```
+
+Restore does NOT release the agent - use /admin/resume for that.
+
+---
+
+### POST /admin/resume/{agent_id}
+
+Resume agent from QUARANTINED or HALTED status.
+
+**Response (200 OK) - Success:**
+```json
+{
+  "status": "resumed",
+  "agent_id": "researcher",
+  "trust_score": 60,
+  "status": "FLAGGED",
+  "probation_until": "2026-10-01T13:00:00Z"
+}
+```
+
+**Response (409 Conflict) - Invalid State:**
+```json
+{
+  "detail": "Cannot resume agent in HEALTHY status" | "Config still mismatches: ..."
+}
+```
+
+Applies probation: trust capped at PROBATION_CAP, rate limit halved, until probation_until passes.
+
+---
+
+### GET /incidents
+
+Get incidents with optional filters.
+
+**Query Parameters:**
+- `agent_id` (optional): Filter by agent
+- `resolved` (optional): true/false
+- `severity` (optional): LOW, MEDIUM, HIGH, CRITICAL
+- `limit` (optional, default 100)
+- `offset` (optional, default 0)
+
+**Response (200 OK):**
+```json
+{
+  "incidents": [
+    {
+      "incident_id": "uuid",
+      "ts": "2026-10-01T12:00:00Z",
+      "agent_id": "researcher",
+      "severity": "HIGH",
+      "summary": "Config hash mismatch",
+      "resolved": false
+    }
+  ],
+  "count": 1
+}
+```
+
+---
+
+### GET /config
+
+Get current gateway configuration thresholds.
+
+**Response (200 OK):**
+```json
+{
+  "trust_healthy_min": 70,
+  "trust_flag_min": 40,
+  "trust_throttle_min": 20,
+  "trust_recovery_per_min": 1.0,
+  "trust_hysteresis": 5,
+  "probation_start_score": 60,
+  "probation_cap": 80,
+  "probation_clean_min": 10,
+  "rate_window_sec": 60,
+  "rate_halt_after_violations": 5,
+  "audit_checkpoint_every": 10,
+  "timestamp_window_sec": 30,
+  "heartbeat_interval_sec": 10,
+  "heartbeat_challenge_expire_sec": 30,
+  "hold_timeout_sec": 300,
+  "hold_sweep_interval_sec": 10,
+  "trust_recovery_interval_sec": 60,
+  "drift_zscore_threshold": 3.0,
+  "demo_mode": true
+}
+```
+
+---
+
+### GET /agents
+
+Get all agents with status, trust, history, etc.
+
+**Response (200 OK):**
+```json
+{
+  "agents": [
+    {
+      "agent_id": "researcher",
+      "status": "HEALTHY",
+      "trust_score": 100,
+      "last_seen": "2026-10-01T12:00:00Z",
+      "config_hash_ok": true,
+      "probation_until": null,
+      "effective_rate_limit": 30,
+      "trust_history": [
+        {"ts": "2026-10-01T12:00:00Z", "score": 100, "reason": "initial_registration"}
+      ]
+    }
+  ]
+}
+```
+
+---
+
+### GET /agents/{agent_id}
+
+Get specific agent with full details.
+
+**Response (200 OK):**
+```json
+{
+  "agent_id": "researcher",
+  "status": "HEALTHY",
+  "trust_score": 100,
+  "last_seen": "2026-10-01T12:00:00Z",
+  "config_hash_ok": true,
+  "probation_until": null,
+  "effective_rate_limit": 30,
+  "trust_history": [...]
+}
+```
+
+---
+
+### POST /attack/{type}
+
+Attack dispatcher - runs attack driver for given type.
+
+**Path Parameters:**
+- `type`: Attack type (injection, tamper, spike, spread, impersonate)
+
+**Response (200 OK) - Driver Exists:**
+```json
+{
+  "attack": "spike",
+  "expected": "some result",
+  "actual": "stub result",
+  "detected": false,
+  "latency_ms": 0.1,
+  "details": "..."
+}
+```
+
+**Response (501 Not Implemented) - Driver Not Built:**
+```json
+{
+  "error": "not_implemented",
+  "type": "injection"
+}
+```
+
+**Response (404 Not Found) - Unknown Type:**
+```json
+{
+  "detail": "Unknown attack type: nope"
+}
+```
+
+---
+
+## Background Tasks
+
+The gateway runs three background tasks:
+
+1. **Heartbeat Scheduler** (every HEARTBEAT_INTERVAL_SEC): For each non-HALTED agent, hash config and verify manifest. On mismatch, QUARANTINE with CRITICAL incident and unchanged trust.
+
+2. **Trust Recovery Loop** (every TRUST_RECOVERY_INTERVAL_SEC): For agents with no violations in the last interval, apply trust recovery. QUARANTINED and HALTED agents never auto-recover. Removes probation cap when probation_until passes.
+
+3. **HOLD Timeout Sweep** (every HOLD_SWEEP_INTERVAL_SEC): Expire PENDING held actions older than HOLD_TIMEOUT_SEC, mark REJECTED_TIMEOUT, write audit record. Expired actions cannot be approved.
+
+All tasks catch and log exceptions, and cancel cleanly on shutdown.
+
+---
+
 ## Audit Chain Details
 
 **Canonical JSON Rule:**

@@ -170,6 +170,17 @@ class Database:
                 )
             """)
             
+            # Heartbeat challenges table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS heartbeat_challenges (
+                    agent_id TEXT NOT NULL,
+                    nonce TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
+                )
+            """)
+            
             # Baselines table (W2)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS baselines (
@@ -423,6 +434,91 @@ class Database:
         conn = self.get_connection()
         rows = conn.execute("SELECT * FROM audit_checkpoints ORDER BY seq ASC").fetchall()
         return [dict(row) for row in rows]
+    
+    def insert_heartbeat_challenge(self, agent_id: str, nonce: str, expires_at: str):
+        """Insert a heartbeat challenge"""
+        with self.transaction() as conn:
+            conn.execute("""
+                INSERT INTO heartbeat_challenges (agent_id, nonce, created_at, expires_at)
+                VALUES (?, ?, datetime('now'), ?)
+            """, (agent_id, nonce, expires_at))
+    
+    def get_heartbeat_challenge(self, nonce: str) -> Optional[Dict[str, Any]]:
+        """Get a heartbeat challenge by nonce"""
+        conn = self.get_connection()
+        row = conn.execute("SELECT * FROM heartbeat_challenges WHERE nonce = ?", (nonce,)).fetchone()
+        return dict(row) if row else None
+    
+    def delete_heartbeat_challenge(self, nonce: str):
+        """Delete a heartbeat challenge after use"""
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM heartbeat_challenges WHERE nonce = ?", (nonce,))
+    
+    def mark_incident_resolved(self, incident_id: str):
+        """Mark an incident as resolved"""
+        with self.transaction() as conn:
+            conn.execute("UPDATE incidents SET resolved = 1 WHERE incident_id = ?", (incident_id,))
+    
+    def get_incidents(self, agent_id: Optional[str] = None, resolved: Optional[bool] = None, 
+                      severity: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """Get incidents with optional filters"""
+        conn = self.get_connection()
+        query = "SELECT * FROM incidents WHERE 1=1"
+        params = []
+        
+        if agent_id:
+            query += " AND agent_id = ?"
+            params.append(agent_id)
+        if resolved is not None:
+            query += " AND resolved = ?"
+            params.append(1 if resolved else 0)
+        if severity:
+            query += " AND severity = ?"
+            params.append(severity)
+        
+        query += " ORDER BY ts DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+    
+    def update_agent_probation(self, agent_id: str, probation_until: Optional[str]):
+        """Update agent probation status"""
+        with self.transaction() as conn:
+            if probation_until:
+                conn.execute("""
+                    UPDATE agents SET probation_until = ? WHERE agent_id = ?
+                """, (probation_until, agent_id))
+            else:
+                conn.execute("""
+                    UPDATE agents SET probation_until = NULL WHERE agent_id = ?
+                """, (agent_id,))
+    
+    def expire_old_challenges(self):
+        """Delete expired heartbeat challenges"""
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM heartbeat_challenges WHERE expires_at < datetime('now')")
+    
+    def get_agents_with_history(self, agent_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get agents with their trust history"""
+        conn = self.get_connection()
+        if agent_id:
+            rows = conn.execute("SELECT * FROM agents WHERE agent_id = ?", (agent_id,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM agents").fetchall()
+        
+        agents = []
+        for row in rows:
+            agent = dict(row)
+            # Get trust history
+            history_rows = conn.execute("""
+                SELECT ts, score, reason FROM trust_history 
+                WHERE agent_id = ? ORDER BY ts DESC LIMIT 10
+            """, (agent['agent_id'],)).fetchall()
+            agent['trust_history'] = [dict(row) for row in history_rows]
+            agents.append(agent)
+        
+        return agents
     
     def close(self):
         """Close database connection"""

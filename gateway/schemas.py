@@ -83,15 +83,36 @@ class Decision(BaseModel):
 
 
 class HeartbeatRequest(BaseModel):
-    """Heartbeat request from agent"""
-    nonce: str = Field(..., description="Challenge nonce from gateway")
-    signature: str = Field(..., description="Signed response to challenge")
+    """Heartbeat request from agent - can be empty to get a challenge, or with nonce+signature to respond"""
+    nonce: Optional[str] = Field(None, description="Challenge nonce from gateway (if responding)")
+    signature: Optional[str] = Field(None, description="Signed response to challenge (if responding)")
 
 
 class HeartbeatResponse(BaseModel):
     """Heartbeat response from gateway"""
-    challenge_nonce: str = Field(..., description="Fresh challenge nonce")
-    config_hash: str = Field(..., description="Gateway-computed config hash")
+    challenge_nonce: Optional[str] = Field(None, description="Fresh challenge nonce (if requesting)")
+    config_hash: Optional[str] = Field(None, description="Gateway-computed config hash (if verification succeeded)")
+
+
+class TrustHistoryEntry(BaseModel):
+    """Trust history entry"""
+    ts: str
+    score: int
+    reason: str
+
+
+class RestoreStepResult(BaseModel):
+    """Result of a single restore step"""
+    step: str = Field(..., description="Step name")
+    success: bool = Field(..., description="Whether step succeeded")
+    details: Optional[str] = Field(None, description="Additional details")
+
+
+class RestoreResult(BaseModel):
+    """Result of restore operation"""
+    agent_id: str
+    steps: List[RestoreStepResult]
+    overall_success: bool
 
 
 class AdminApproval(BaseModel):
@@ -126,10 +147,11 @@ class AgentInfo(BaseModel):
     agent_id: str
     status: AgentStatus
     trust_score: int
-    last_seen: str
+    last_seen: Optional[str] = None
     current_rate_limit: Optional[int] = None
-    config_hash_state: str = Field(..., description="matched or mismatched")
+    config_hash_ok: bool = Field(..., description="Whether config hash matches manifest")
     probation_until: Optional[str] = None
+    trust_history: List[TrustHistoryEntry] = Field(default_factory=list)
 
 
 class TrustHistoryEntry(BaseModel):
@@ -142,9 +164,12 @@ class TrustHistoryEntry(BaseModel):
 class VerifyChainResult(BaseModel):
     """Audit chain verification result"""
     valid: bool
+    records_checked: int = 0
     first_broken_seq: Optional[int] = None
     expected_hash: Optional[str] = None
     actual_hash: Optional[str] = None
+    reason: Optional[str] = None
+    checkpoints_checked: int = 0
 
 
 class WebSocketMessage(BaseModel):

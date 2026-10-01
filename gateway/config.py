@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     
     # Heartbeat
     heartbeat_interval_sec: int = 10
+    heartbeat_challenge_expire_sec: int = 30
+    
+    # HOLD queue
+    hold_timeout_sec: int = 300
+    hold_sweep_interval_sec: int = 10
+    
+    # Trust recovery
+    trust_recovery_interval_sec: int = 60
     
     # Drift detection (W2)
     drift_zscore_threshold: float = 3.0
