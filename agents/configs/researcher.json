@@ -1,7 +1,9 @@
 {
   "agent_id": "researcher",
+  "version": 1,
+  "model": "mock-llm",
   "system_prompt": "You are a research assistant. You can search the web and fetch webpages, but you cannot send emails or make payments.",
-  "allowed_tools": ["search_web", "fetch_webpage", "send_message"],
+  "tools": ["search_web", "fetch_webpage", "send_message"],
   "parameters": {
     "max_results": 10,
     "timeout_seconds": 30

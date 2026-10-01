@@ -1,6 +1,6 @@
 {
   "agent_id": "researcher",
-  "config_hash": "41a26a87facffdbfb8a52f8e6b016b28269b0c42802ff32070d49abaebe256b4",
+  "config_hash": "e5d78af006e2c967e9bdef6746de2425583aead8d02a4fd20dcb3e526b453f1c",
   "signed_at": "2026-10-01T12:00:00Z",
-  "admin_signature": "6b7d5901c9496ed8c30d93c64f4fdbabb437c9f71dff4710c7c4452f7d1e49e8ea2b3d8eb80fb503a7afebf9a1a2d79305f30e397a16c50082c11a9de802e005"
+  "admin_signature": "79fcede2d87408674a1b3c9a1ce659a61d10a8fc788af21336c833dc7e294366e7c32c5a5820c3db5c35b8823875d3eb2dfd8a971cc7784e68e4ee42bc5d030b"
 }

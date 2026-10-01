@@ -13,11 +13,31 @@ Twilight is a runtime integrity gateway for multi-agent networks. All agent acti
 - Compact separators (no spaces after commas/colons)
 - UTF-8 encoding
 - No extra whitespace
+- **Signature field excluded** when signing
 
 Example canonical JSON:
 ```json
 {"agent_id":"researcher","args":{"query":"example"},"event_id":"123e4567-e89b-12d3-a456-426614174000","nonce":"abc123","tool":"search_web","ts":"2026-10-01T12:00:00Z","type":"tool_call"}
 ```
+
+---
+
+## Tools
+
+All tool execution must go through the gateway. Tools are mock implementations that record effects.
+
+| Tool | Arguments | Sensitive Args (Redacted) |
+|---|---|---|
+| `search_web` | `{query: str}` | None |
+| `fetch_webpage` | `{url: str}` | None |
+| `send_email` | `{to: str, subject: str, body: str}` | `body` |
+| `read_inbox` | `{limit: int}` | None |
+| `make_payment` | `{to_account: str, amount: number, memo: str}` | `to_account` |
+| `send_message` | `{to_agent: str, content: str}` | `content` |
+
+**Redaction:** Sensitive arguments are replaced with `***` in audit records, WebSocket messages, and logs.
+
+---
 
 ---
 

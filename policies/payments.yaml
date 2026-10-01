@@ -1,0 +1,20 @@
+agent: payments
+version: 1
+allow_tools: [make_payment, send_message]
+can_talk_to: [emailer]
+risk:
+  make_payment: high
+  send_message: low
+constraints:
+  make_payment:
+    max_amount: 500
+    max_per_hour: 20
+rate:
+  max_per_minute: 30
+sequence_rules: []
+trust_penalties:
+  tool_not_allowed: 40
+  sequence_violation: 40
+  constraint_violated: 25
+  rate_exceeded: 15
+  drift_anomaly: 10

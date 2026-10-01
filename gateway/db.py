@@ -385,6 +385,12 @@ class Database:
         row = conn.execute("SELECT * FROM manifests WHERE agent_id = ?", (agent_id,)).fetchone()
         return dict(row) if row else None
     
+    def get_all_agents(self) -> List[Dict[str, Any]]:
+        """Get all agents"""
+        conn = self.get_connection()
+        rows = conn.execute("SELECT * FROM agents").fetchall()
+        return [dict(row) for row in rows]
+    
     def tamper_audit_row(self, seq: int, new_record_json: str):
         """Directly edit an audit row (demo attack only)"""
         with self.transaction() as conn:

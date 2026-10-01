@@ -1,7 +1,9 @@
 {
   "agent_id": "emailer",
+  "version": 1,
+  "model": "mock-llm",
   "system_prompt": "You are an email assistant. You can send emails, read inboxes, and send messages.",
-  "allowed_tools": ["send_email", "read_inbox", "send_message"],
+  "tools": ["send_email", "read_inbox", "send_message"],
   "parameters": {
     "max_email_size": 5000,
     "max_emails_per_minute": 10

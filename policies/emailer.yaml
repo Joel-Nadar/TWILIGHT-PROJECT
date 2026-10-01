@@ -1,0 +1,24 @@
+agent: emailer
+version: 1
+allow_tools: [send_email, read_inbox, send_message]
+can_talk_to: [researcher, payments]
+risk:
+  send_email: medium
+  read_inbox: low
+  send_message: low
+constraints:
+  send_email:
+    to_domain: ["company.com"]
+    max_body_chars: 5000
+    max_per_minute: 10
+  read_inbox:
+    max_limit: 100
+rate:
+  max_per_minute: 30
+sequence_rules: []
+trust_penalties:
+  tool_not_allowed: 40
+  sequence_violation: 40
+  constraint_violated: 25
+  rate_exceeded: 15
+  drift_anomaly: 10

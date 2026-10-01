@@ -1,0 +1,22 @@
+agent: researcher
+version: 1
+allow_tools: [search_web, fetch_webpage, send_message]
+can_talk_to: [emailer]
+risk:
+  search_web: low
+  fetch_webpage: low
+  send_message: low
+constraints:
+  search_web:
+    max_results: 10
+  fetch_webpage:
+    max_pages: 5
+rate:
+  max_per_minute: 30
+sequence_rules: []
+trust_penalties:
+  tool_not_allowed: 40
+  sequence_violation: 40
+  constraint_violated: 25
+  rate_exceeded: 15
+  drift_anomaly: 10
