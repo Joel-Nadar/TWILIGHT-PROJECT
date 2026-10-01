@@ -1,15 +1,21 @@
 """
 Decision pipeline for Twilight Gateway.
-Orchestrates steps 1-4 and 10-12 with fail-closed wrapper.
+Orchestrates steps 1-4, 6-9, 10-12 with fail-closed wrapper.
 """
 import time
 import threading
 from datetime import datetime, timezone
 from typing import Dict, Any
-from gateway.schemas import Verdict, AgentStatus, Decision
+from gateway.schemas import Verdict, AgentStatus, Decision, Severity
 from gateway.db import db
 from gateway.config import settings
 from engine.attestation import verify_signature, check_nonce_and_timestamp, verify_config_hash, insert_nonce
+from engine.policy import check_policy, get_recent_history
+from engine.trust import apply_penalty, status_for_score, apply_trust_update
+from engine.enforcer import (
+    check_status, decide, check_sustained_rate_violations,
+    apply_response_ladder, write_incident, publish_trust_change, publish_status_change
+)
 from gateway.tools import execute_tool
 from audit.chain import append_record
 from gateway.websocket import manager
@@ -94,7 +100,7 @@ def run_pipeline(event: Dict[str, Any], api_key: str) -> Decision:
                 decision.rule = "attestation.config_hash_mismatch"
                 decision.response = "blocked"
                 decision.verdict = Verdict.QUARANTINE
-                decision.severity = "CRITICAL"
+                decision.severity = Severity.CRITICAL
                 decision.status = AgentStatus.QUARANTINED
                 decision.trust_after = agent["trust_score"]  # Trust unchanged (critical override)
                 decision.evidence = {"computed_hash": computed_hash}
@@ -107,10 +113,11 @@ def run_pipeline(event: Dict[str, Any], api_key: str) -> Decision:
                     summary=f"Config hash mismatch: {hash_error}"
                 )
                 db.insert_incident(incident.model_dump())
+                write_incident(event["agent_id"], "CRITICAL", f"Config hash mismatch: {hash_error}", "attestation.config_hash_mismatch")
                 
                 return decision
             
-            # Step 4: Minimal policy check (tool in allow_tools)
+            # Step 4: Full policy check
             policy = load_agent_policy(event["agent_id"])
             if not policy:
                 decision.reason = "Policy not found for agent"
@@ -120,37 +127,114 @@ def run_pipeline(event: Dict[str, Any], api_key: str) -> Decision:
                 return decision
             
             tool = event.get("tool")
-            allow_tools = policy.get("allow_tools", [])
+            history = get_recent_history(event["agent_id"])
+            policy_result = check_policy(event, policy, history)
             
-            if tool not in allow_tools:
-                decision.reason = f"Tool '{tool}' not allowed for this agent"
-                decision.rule = "allow_tools"
-                decision.response = "blocked"
+            if not policy_result["allowed"]:
+                # Policy rejected
+                decision.reason = policy_result["reason"]
+                decision.rule = policy_result["rule"]
+                severity_str = policy_result.get("severity")
+                decision.severity = Severity(severity_str) if severity_str else None
                 decision.verdict = Verdict.BLOCK
-                decision.evidence = {"requested_tool": tool}
+                decision.response = "blocked"
+                decision.evidence = {"policy_check": policy_result}
+                
+                # Apply penalty and update status (fetch fresh agent state from DB)
+                fresh_agent = db.get_agent(event["agent_id"])
+                new_score = apply_penalty(fresh_agent["trust_score"], decision.reason, policy)
+                new_status = status_for_score(new_score, fresh_agent["status"])
+                apply_trust_update(event["agent_id"], new_score, new_status, decision.reason)
+                
+                # Use computed values directly (don't rely on DB read due to transaction visibility)
+                decision.trust_after = new_score
+                decision.status = new_status
+                
+                # Update cached agent for publishing
+                agent = fresh_agent
+                
+                # Write incident
+                if decision.severity:
+                    severity_val = decision.severity.value if hasattr(decision.severity, 'value') else str(decision.severity)
+                    write_incident(event["agent_id"], severity_val, decision.reason, decision.rule)
+                
+                # Publish changes
+                publish_trust_change(event["agent_id"], agent["trust_score"], new_score, decision.reason)
+                if new_status != agent["status"]:
+                    publish_status_change(event["agent_id"], agent["status"], new_status.value, decision.reason)
+                
                 return decision
             
-            # Allow the action
-            decision.verdict = Verdict.ALLOW
-            decision.response = "allow"
-            decision.reason = "Tool allowed"
-            decision.rule = "allow_tools"
-            decision.trust_after = agent["trust_score"]
+            # Step 5: Drift (skipped - Phase 2)
             
-            # Step 10: Execute tool
-            tool_result = execute_tool(tool, event.get("args", {}), event.get("event_id"), api_key)
-            if not tool_result["success"]:
+            # Step 6: Decide verdict and response
+            verdict, response, severity = decide(policy_result, agent, tool, policy)
+            decision.verdict = verdict
+            decision.response = response
+            if severity:
+                decision.severity = severity if isinstance(severity, Severity) else Severity(severity)
+            else:
+                decision.severity = None
+            decision.rule = policy_result["rule"]
+            
+            # Check for sustained rate violations (THROTTLE -> HALT)
+            if response == "throttled" and check_sustained_rate_violations(event["agent_id"]):
                 decision.verdict = Verdict.BLOCK
-                decision.response = "blocked"
-                decision.reason = tool_result["result"]
-                decision.rule = "tool.execution_error"
+                decision.response = "halted"
+                decision.reason = "Sustained rate violations - agent halted"
+                decision.rule = "rate.sustained_violations"
+                decision.status = AgentStatus.HALTED
+                apply_trust_update(event["agent_id"], agent["trust_score"], AgentStatus.HALTED, decision.reason)
+                write_incident(event["agent_id"], "CRITICAL", decision.reason, decision.rule)
+                publish_status_change(event["agent_id"], agent["status"], "HALTED", decision.reason)
+                return decision
             
-            decision.evidence = {"tool_result": tool_result["redacted_args"]}
+            # Step 7: HOLD queue
+            if verdict == Verdict.HOLD:
+                # Store in held_actions
+                import json
+                db.insert_held_action(
+                    event.get("event_id"),
+                    event["agent_id"],
+                    json.dumps(event)
+                )
+                decision.reason = policy_result["reason"]
+                decision.trust_after = agent["trust_score"]
+                decision.status = AgentStatus(agent["status"])
+                return decision
+            
+            # Step 8: Trust (penalties already applied for BLOCK)
+            # For ALLOW/FLAG, no penalty, just update last_seen
+            if verdict in [Verdict.ALLOW, Verdict.FLAG]:
+                decision.trust_after = agent["trust_score"]
+                decision.status = AgentStatus(agent["status"])
+            
+            # Step 9: Response ladder (update status if needed)
+            if verdict == Verdict.BLOCK:
+                new_score, new_status = apply_response_ladder(
+                    event["agent_id"], verdict, response, agent, policy,
+                    decision.reason, decision.rule
+                )
+                decision.trust_after = new_score
+                decision.status = new_status
+            
+            # Step 10: Execute tool (only ALLOW/FLAG or approved HOLD)
+            if verdict in [Verdict.ALLOW, Verdict.FLAG]:
+                tool_result = execute_tool(tool, event.get("args", {}), event.get("event_id"), api_key)
+                if not tool_result["success"]:
+                    decision.verdict = Verdict.BLOCK
+                    decision.response = "blocked"
+                    decision.reason = tool_result["result"]
+                    decision.rule = "tool.execution_error"
+                
+                decision.evidence = {"tool_result": tool_result["redacted_args"]}
             
             return decision
     
     except Exception as exc:
         # Fail-closed: any exception results in BLOCK
+        import traceback
+        traceback.print_exc()  # Print traceback for debugging
         decision.verdict = Verdict.BLOCK
         decision.response = "blocked"
         decision.reason = "internal_error"
@@ -224,3 +308,7 @@ def load_agent_policy(agent_id: str) -> Dict[str, Any]:
     
     with open(policy_path, 'r') as f:
         return yaml.safe_load(f)
+
+
+# Export load_agent_policy for use in main.py
+__all__ = ["run_pipeline", "load_agent_policy"]

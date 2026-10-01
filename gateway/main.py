@@ -14,6 +14,7 @@ from gateway.schemas import (
     AgentRegistration, ActionEvent, Decision, HeartbeatRequest, HeartbeatResponse,
     AdminApproval, AgentInfo, VerifyChainResult, Incident, TrustHistoryEntry
 )
+from gateway.pipeline import run_pipeline, load_agent_policy
 from gateway.config import settings
 from gateway.db import db
 from gateway.pipeline import run_pipeline
@@ -197,6 +198,63 @@ async def get_incidents(agent_id: Optional[str] = None, resolved: Optional[bool]
     """Get security incidents"""
     incidents = db.get_incidents(agent_id, resolved)
     return {"incidents": incidents}
+
+
+@app.post("/admin/approve/{event_id}")
+async def approve_held_action(event_id: str, approval: AdminApproval):
+    """Approve or reject a held action"""
+    held_action = db.get_held_action(event_id)
+    if not held_action:
+        raise HTTPException(status_code=404, detail="Held action not found")
+    
+    # Check if already decided
+    if held_action["status"] != "PENDING":
+        return {
+            "status": held_action["status"].lower(),
+            "event_id": event_id,
+            "executed": held_action["status"] == "APPROVED"
+        }
+    
+    import json
+    event = json.loads(held_action["event_json"])
+    
+    if approval.approved:
+        # Execute tool
+        from gateway.tools import execute_tool
+        tool_result = execute_tool(
+            event.get("tool"),
+            event.get("args", {}),
+            event.get("event_id"),
+            settings.gateway_api_key
+        )
+        
+        db.update_held_action_status(event_id, "APPROVED")
+        
+        return {
+            "status": "approved",
+            "event_id": event_id,
+            "executed": tool_result["success"]
+        }
+    else:
+        # Reject and apply penalty
+        db.update_held_action_status(event_id, "REJECTED")
+        
+        # Apply penalty
+        agent = db.get_agent(event["agent_id"])
+        if agent:
+            from engine.policy import load_agent_policy
+            from engine.trust import apply_penalty, status_for_score, apply_trust_update
+            policy = load_agent_policy(event["agent_id"])
+            new_score = apply_penalty(agent["trust_score"], "held_action_rejected", policy)
+            new_status = status_for_score(new_score, agent["status"])
+            apply_trust_update(event["agent_id"], new_score, new_status, "held_action_rejected")
+        
+        return {
+            "status": "rejected",
+            "event_id": event_id,
+            "executed": False,
+            "penalty_applied": True
+        }
 
 
 @app.websocket("/ws")

@@ -15,7 +15,11 @@ constraints:
     max_limit: 100
 rate:
   max_per_minute: 30
-sequence_rules: []
+sequence_rules:
+  - name: no_email_when_input_untrusted
+    when_context: {input_taint: untrusted}
+    then: send_email
+    action: HOLD
 trust_penalties:
   tool_not_allowed: 40
   sequence_violation: 40
