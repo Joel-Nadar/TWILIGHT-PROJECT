@@ -25,10 +25,12 @@ from gateway.websocket import manager
 decision_lock = threading.Lock()
 
 
-def run_pipeline(event: Dict[str, Any], api_key: str) -> Decision:
+def run_pipeline(event: Dict[str, Any], api_key: str, runtime_mode: str = "on") -> Decision:
     """
     Run the decision pipeline for an event.
     Steps 1-4 and 10-12 with fail-closed wrapper.
+    
+    runtime_mode: "off" (no actions), "dry-run" (no tool execution), "on" (full operation)
     """
     start_time = time.perf_counter()
     
@@ -219,15 +221,21 @@ def run_pipeline(event: Dict[str, Any], api_key: str) -> Decision:
                 decision.status = new_status
             
             # Step 10: Execute tool (only ALLOW/FLAG or approved HOLD)
+            # Skip execution in dry-run mode
             if verdict in [Verdict.ALLOW, Verdict.FLAG]:
-                tool_result = execute_tool(tool, event.get("args", {}), event.get("event_id"), api_key)
-                if not tool_result["success"]:
-                    decision.verdict = Verdict.BLOCK
-                    decision.response = "blocked"
-                    decision.reason = tool_result["result"]
-                    decision.rule = "tool.execution_error"
-                
-                decision.evidence = {"tool_result": tool_result["redacted_args"]}
+                if runtime_mode == "dry-run":
+                    # Dry-run: don't execute tool, just simulate
+                    decision.evidence = {"dry_run": True, "tool": tool, "args": event.get("args", {})}
+                else:
+                    # Normal mode: execute tool
+                    tool_result = execute_tool(tool, event.get("args", {}), event.get("event_id"), api_key)
+                    if not tool_result["success"]:
+                        decision.verdict = Verdict.BLOCK
+                        decision.response = "blocked"
+                        decision.reason = tool_result["result"]
+                        decision.rule = "tool.execution_error"
+                    
+                    decision.evidence = {"tool_result": tool_result["redacted_args"]}
             
             return decision
     
@@ -288,7 +296,10 @@ def run_pipeline(event: Dict[str, Any], api_key: str) -> Decision:
             import asyncio
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(manager.publish("decision", decision.model_dump(exclude={"evidence"})))
+                loop.create_task(manager.publish({
+                    "type": "decision",
+                    "data": decision.model_dump(exclude={"evidence"})
+                }))
             except RuntimeError:
                 # No event loop running (e.g., in tests)
                 pass

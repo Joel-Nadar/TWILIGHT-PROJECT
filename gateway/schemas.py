@@ -115,6 +115,11 @@ class RestoreResult(BaseModel):
     overall_success: bool
 
 
+class RuntimeMode(BaseModel):
+    """Runtime mode for gateway"""
+    mode: str = Field(..., description="off, dry-run, or on")
+
+
 class AdminApproval(BaseModel):
     """Admin approval for held action"""
     approved: bool = Field(..., description="True to approve, False to reject")

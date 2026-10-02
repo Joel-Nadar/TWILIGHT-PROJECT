@@ -1,36 +1,52 @@
 #!/bin/bash
-# Twilight Demo Script
-# Resets database, starts gateway, runs baseline scenarios
+# run_demo.sh - One-command startup for Twilight Gateway
+# Starts the gateway with all services
 
-echo "=================================="
-echo "Twilight Backend Demo"
-echo "=================================="
+set -e
+
+echo "========================================"
+echo "Twilight Gateway - Demo Startup"
+echo "========================================"
+echo ""
+
+# Check if Python is available
+if ! command -v python &> /dev/null; then
+    echo "Error: Python not found. Please install Python 3.11+"
+    exit 1
+fi
+
+# Check if required packages are installed
+echo "Checking dependencies..."
+python -c "import fastapi, uvicorn, pydantic, pynacl, yaml" 2>/dev/null || {
+    echo "Error: Required packages not found. Installing..."
+    pip install fastapi uvicorn pydantic pydantic-settings pynacl pyyaml python-multipart pytest httpx
+}
 
 # Reset database
 echo ""
-echo "[1/3] Resetting database..."
+echo "Resetting database..."
 python scripts/reset_db.py
 
-# Start gateway in background
+# Generate keys if not exists
 echo ""
-echo "[2/3] Starting gateway..."
-uvicorn gateway.main:app --host 127.0.0.1 --port 8000 &
-GATEWAY_PID=$!
+echo "Setting up keys..."
+if [ ! -f "keys/gateway_private.pem" ]; then
+    python scripts/setup_keys.py
+fi
 
-# Wait for gateway to start
-echo "Waiting for gateway to start..."
-sleep 3
-
-# Run baseline scenarios
+# Sign manifests
 echo ""
-echo "[3/3] Running baseline scenarios..."
-python agents/scenarios.py
+echo "Signing manifests..."
+python scripts/sign_manifests.py
 
-# Cleanup
+# Start gateway
 echo ""
-echo "Demo complete. Stopping gateway..."
-kill $GATEWAY_PID
+echo "========================================"
+echo "Starting Twilight Gateway..."
+echo "API Docs: http://127.0.0.1:8000/docs"
+echo "WebSocket: ws://127.0.0.1:8000/ws"
+echo "Mode: $(grep RUNTIME_MODE .env 2>/dev/null || echo 'on (default)')"
+echo "========================================"
+echo ""
 
-echo "=================================="
-echo "Demo finished"
-echo "=================================="
+python -m uvicorn gateway.main:app --host 127.0.0.1 --port 8000 --reload

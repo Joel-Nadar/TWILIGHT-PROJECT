@@ -13,7 +13,7 @@ from datetime import datetime
 from gateway.schemas import (
     AgentRegistration, ActionEvent, Decision, HeartbeatRequest, HeartbeatResponse,
     AdminApproval, AgentInfo, VerifyChainResult, Incident, TrustHistoryEntry,
-    RestoreStepResult, RestoreResult
+    RestoreStepResult, RestoreResult, RuntimeMode
 )
 from gateway.pipeline import run_pipeline, load_agent_policy
 from gateway.config import settings
@@ -132,8 +132,23 @@ async def register_agent(registration: AgentRegistration):
 @app.post("/action", response_model=Decision)
 async def submit_action(event: ActionEvent, x_api_key: Optional[str] = Header(None)):
     """Submit an agent action for validation and execution"""
+    # Check runtime mode
+    if settings.runtime_mode == "off":
+        return Decision(
+            verdict=Verdict.BLOCK,
+            response="blocked",
+            reason="Gateway is in OFF mode - no actions processed",
+            rule="runtime_mode.off",
+            severity=Severity.MEDIUM,
+            trust_before=None,
+            trust_after=None,
+            status=None,
+            evidence={},
+            latency_ms=0
+        )
+    
     # Run pipeline
-    decision = run_pipeline(event.model_dump(), x_api_key or "")
+    decision = run_pipeline(event.model_dump(), x_api_key or "", settings.runtime_mode)
     return decision
 
 
@@ -626,9 +641,31 @@ async def get_config():
         "hold_sweep_interval_sec": settings.hold_sweep_interval_sec,
         "trust_recovery_interval_sec": settings.trust_recovery_interval_sec,
         "drift_zscore_threshold": settings.drift_zscore_threshold,
-        "demo_mode": settings.demo_mode
+        "demo_mode": settings.demo_mode,
+        "runtime_mode": settings.runtime_mode,
+        "pipeline_timeout_sec": settings.pipeline_timeout_sec,
+        "tool_timeout_sec": settings.tool_timeout_sec
     }
 
+
+@app.get("/mode")
+async def get_mode():
+    """Get current runtime mode"""
+    return {"mode": settings.runtime_mode}
+
+
+@app.post("/mode")
+async def set_mode(mode_request: RuntimeMode):
+    """Set runtime mode (off, dry-run, on)"""
+    valid_modes = ["off", "dry-run", "on"]
+    if mode_request.mode not in valid_modes:
+        raise HTTPException(status_code=400, detail=f"Invalid mode. Must be one of: {valid_modes}")
+    
+    settings.runtime_mode = mode_request.mode
+    return {"mode": settings.runtime_mode, "message": f"Runtime mode set to {mode_request.mode}"}
+
+
+@app.get("/agents/{agent_id}")
 async def get_agent(agent_id: str):
     """Get specific agent with full details"""
     agents = db.get_agents_with_history(agent_id)

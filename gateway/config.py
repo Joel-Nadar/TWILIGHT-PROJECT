@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     # Mode settings
     fail_mode: str = "closed"  # "closed" or "open"
     demo_mode: bool = True
+    runtime_mode: str = "on"  # "off", "dry-run", "on"
     
     # Security
     gateway_api_key: str = "change-me"
@@ -58,6 +59,10 @@ class Settings(BaseSettings):
     
     # Drift detection (W2)
     drift_zscore_threshold: float = 3.0
+    
+    # Timeouts
+    pipeline_timeout_sec: int = 30
+    tool_timeout_sec: int = 10
     
     model_config = SettingsConfigDict(
         env_file=".env",

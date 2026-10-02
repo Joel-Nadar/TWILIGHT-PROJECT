@@ -102,7 +102,9 @@ async def trust_recovery_loop(app):
                 
                 if violations['count'] == 0:
                     # No violations, recover trust
-                    new_score = recover_clean_agent(agent_id)
+                    current_score = agent['trust_score']
+                    is_on_probation = agent['probation_until'] is not None
+                    new_score = recover_clean_agent(agent_id, current_score, is_on_probation)
                     
                     # Check probation expiry
                     if agent['probation_until']:
